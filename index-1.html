@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ngobrol Berempat</title>
+<style>
+  :root{
+    --bg:#12141a; --panel:#1b1e27; --line:#2a2e3b; --text:#e8eaf0; --muted:#8b91a3;
+    --accent:#5b8cff; --ok:#3ddc84; --warn:#ffb74d; --bad:#ff5d5d;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:var(--bg);color:var(--text);font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  [hidden]{display:none!important}
+  button,input{font:inherit;color:inherit}
+  input{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
+  input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+  button{background:var(--accent);border:0;border-radius:10px;padding:10px 14px;cursor:pointer;font-weight:600}
+  button.ghost{background:var(--panel);border:1px solid var(--line);font-weight:500}
+  button.danger{background:var(--bad)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+
+  #join{max-width:420px;margin:12vh auto 0;padding:24px;background:var(--panel);border:1px solid var(--line);border-radius:16px}
+  #join h1{margin:0 0 4px;font-size:1.4rem}
+  #join p{margin:0 0 18px;color:var(--muted);font-size:.92rem}
+  #join label{display:block;margin:12px 0 6px;font-size:.85rem;color:var(--muted)}
+  #join button{width:100%;margin-top:18px}
+  #joinErr{color:var(--bad);font-size:.9rem;margin-top:12px;min-height:1.2em}
+
+  #room{height:100dvh;display:flex;flex-direction:column;max-width:760px;margin:0 auto}
+  header{padding:12px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .top b{font-size:1rem}
+  .top small{color:var(--muted)}
+  #status{font-size:.82rem;color:var(--warn);margin-top:4px;min-height:1.1em}
+  #people{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .chip{display:flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;font-size:.88rem;background:var(--bg)}
+  .chip i{width:9px;height:9px;border-radius:50%;background:var(--muted);transition:.12s}
+  .chip.speak{border-color:var(--ok)}
+  .chip.speak i{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .chip.muted::after{content:"🔇";font-size:.8rem}
+
+  #log{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px}
+  .msg{max-width:85%;padding:8px 12px;border-radius:14px;background:var(--panel);border:1px solid var(--line);word-wrap:break-word;overflow-wrap:anywhere}
+  .msg .who{font-size:.75rem;color:var(--muted);margin-bottom:2px}
+  .msg.me{align-self:flex-end;background:#243255;border-color:#2f4278}
+  .sys{align-self:center;color:var(--muted);font-size:.8rem}
+
+  footer{padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--line);background:var(--panel)}
+  #controls{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+  #controls button{padding:8px 12px;font-size:.88rem}
+  #chatForm{display:flex;gap:8px}
+</style>
+</head>
+<body>
+
+<section id="join">
+  <h1>Ngobrol Berempat</h1>
+  <p>Chat dan voice chat langsung antar-perangkat (peer-to-peer), maksimal 4 orang.</p>
+  <label for="nick">Namamu</label>
+  <input id="nick" maxlength="20" placeholder="mis. Budi" autocomplete="off">
+  <label for="code">Kode ruangan</label>
+  <input id="code" maxlength="30" placeholder="mis. kami-berempat" autocomplete="off">
+  <button id="joinBtn">Masuk</button>
+  <div id="joinErr"></div>
+</section>
+
+<section id="room" hidden>
+  <header>
+    <div class="top">
+      <div><b id="roomName"></b> <small id="count"></small></div>
+      <button class="ghost" id="copyBtn">Salin link undangan</button>
+    </div>
+    <div id="status"></div>
+    <div id="people"></div>
+  </header>
+  <div id="log"></div>
+  <footer>
+    <div id="controls">
+      <button class="ghost" id="muteBtn">🎤 Mikrofon nyala</button>
+      <button class="danger" id="leaveBtn">Keluar</button>
+    </div>
+    <form id="chatForm">
+      <input id="msg" maxlength="500" placeholder="Tulis pesan…" autocomplete="off">
+      <button type="submit">Kirim</button>
+    </form>
+  </footer>
+</section>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(() => {
+  const MAX = 4;
+  const PREFIX = 'ngobrol4-';
+  const RTC_CONFIG = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
+      // TURN publik gratis sebagai cadangan kalau jaringan memblokir koneksi langsung
+      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+    ]
+  };
+
+  const $ = s => document.querySelector(s);
+  let peer = null, mySlot = 0, myName = '', room = '';
+  let localStream = null, micReal = false, muted = false;
+  let audioCtx = null;
+  const conns = {};   // slot -> { data, name, announced }
+  const calls = {};   // slot -> { call, audio }
+  const levels = {};  // slot -> speaking (bool)
+  const leaveTimers = {};
+
+  const peerId = s => PREFIX + room + '-' + s;
+  const slotFromId = id => parseInt(id.slice(id.lastIndexOf('-') + 1), 10);
+  const clean = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+  // ---------- UI helpers ----------
+  function setStatus(t) { $('#status').textContent = t || ''; }
+
+  function addLog(text, who, me) {
+    const log = $('#log');
+    const near = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    const el = document.createElement('div');
+    if (who === null) {
+      el.className = 'sys';
+      el.textContent = text;
+    } else {
+      el.className = 'msg' + (me ? ' me' : '');
+      const w = document.createElement('div');
+      w.className = 'who';
+      const t = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+      w.textContent = who + ' · ' + t;
+      const b = document.createElement('div');
+      b.textContent = text;
+      el.append(w, b);
+    }
+    log.appendChild(el);
+    if (near || me) log.scrollTop = log.scrollHeight;
+  }
+
+  function renderPeople() {
+    const box = $('#people');
+    box.innerHTML = '';
+    const mk = (name, slot, isMe) => {
+      const c = document.createElement('div');
+      c.className = 'chip' + (levels[slot] ? ' speak' : '') + (isMe && muted ? ' muted' : '');
+      const dot = document.createElement('i');
+      const n = document.createElement('span');
+      n.textContent = name + (isMe ? ' (kamu)' : '');
+      c.append(dot, n);
+      box.appendChild(c);
+    };
+    mk(myName, mySlot, true);
+    let n = 1;
+    Object.keys(conns).sort().forEach(k => {
+      const e = conns[k];
+      if (e.name) { mk(e.name, +k, false); n++; }
+    });
+    $('#count').textContent = n + '/' + MAX + ' orang';
+  }
+
+  // ---------- Mikrofon & deteksi suara ----------
+  async function getMic() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+      micReal = true;
+      return s;
+    } catch (e) {
+      // Tanpa mikrofon: tetap bisa mendengar dan chat, kirim audio kosong
+      micReal = false;
+      return audioCtx.createMediaStreamDestination().stream;
+    }
+  }
+
+  function watchLevel(stream, slot) {
+    try {
+      const src = audioCtx.createMediaStreamSource(stream);
+      const an = audioCtx.createAnalyser();
+      an.fftSize = 512;
+      src.connect(an);
+      const buf = new Uint8Array(an.fftSize);
+      const timer = setInterval(() => {
+        an.getByteTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+        const speaking = Math.sqrt(sum / buf.length) > 0.04 && !(slot === mySlot && muted);
+        if (levels[slot] !== speaking) { levels[slot] = speaking; renderPeople(); }
+      }, 150);
+      return () => { clearInterval(timer); levels[slot] = false; try { src.disconnect(); } catch (e) {} };
+    } catch (e) { return () => {}; }
+  }
+
+  // ---------- Panggilan suara ----------
+  function dropCall(slot) {
+    const c = calls[slot];
+    if (!c) return;
+    delete calls[slot];
+    try { c.call.close(); } catch (e) {}
+    if (c.stopWatch) c.stopWatch();
+    if (c.audio) { c.audio.srcObject = null; c.audio.remove(); }
+  }
+
+  function attachCall(slot, call) {
+    dropCall(slot);
+    const entry = { call, audio: null, stopWatch: null };
+    calls[slot] = entry;
+    call.on('stream', stream => {
+      if (entry.audio) return;
+      const a = document.createElement('audio');
+      a.autoplay = true;
+      a.playsInline = true;
+      a.srcObject = stream;
+      document.body.appendChild(a);
+      a.play().catch(() => {});
+      entry.audio = a;
+      entry.stopWatch = watchLevel(stream, slot);
+    });
+    call.on('close', () => { if (calls[slot] === entry) dropCall(slot); });
+    call.on('error', () => { if (calls[slot] === entry) dropCall(slot); });
+  }
+
+  // ---------- Koneksi data (chat) ----------
+  function sendTo(entry, obj) { try { if (entry.data.open) entry.data.send(obj); } catch (e) {} }
+  function broadcast(obj) { Object.values(conns).forEach(e => sendTo(e, obj)); }
+
+  function registerData(c, outgoing) {
+    const slot = outgoing ? slotFromId(c.peer) : (c.metadata && c.metadata.slot);
+    if (!slot || slot === mySlot) { c.close(); return; }
+
+    c.on('open', () => {
+      const existing = conns[slot];
+      if (existing && existing.data.open) {
+        // Dua koneksi sekaligus: pertahankan yang diinisiasi slot lebih kecil
+        const keep = Math.min(mySlot, slot);
+        const newInit = outgoing ? mySlot : slot;
+        if (newInit !== keep) { c.close(); return; }
+        existing.replaced = true;
+        existing.data.close();
+      }
+      clearTimeout(leaveTimers[slot]);
+      const entry = { data: c, name: existing ? existing.name : '', announced: existing ? existing.announced : false };
+      conns[slot] = entry;
+      sendTo(entry, { t: 'hello', name: myName });
+      // Yang slotnya lebih kecil memulai panggilan suara (satu panggilan per pasangan)
+      if (mySlot < slot) attachCall(slot, peer.call(peerId(slot), localStream, { metadata: { slot: mySlot } }));
+      renderPeople();
+    });
+
+    c.on('data', d => {
+      const entry = conns[slot];
+      if (!entry || entry.data !== c || !d || typeof d !== 'object') return;
+      if (d.t === 'hello') {
+        entry.name = String(d.name || 'Tanpa nama').slice(0, 20);
+        if (!entry.announced) { entry.announced = true; addLog(entry.name + ' bergabung', null); }
+        renderPeople();
+      } else if (d.t === 'chat') {
+        addLog(String(d.text || '').slice(0, 500), entry.name || 'Tanpa nama', false);
+      }
+    });
+
+    const gone = () => {
+      const entry = conns[slot];
+      if (!entry || entry.data !== c) return;
+      delete conns[slot];
+      renderPeople();
+      // Tunda pengumuman sebentar, supaya pergantian koneksi tidak terbaca sebagai "keluar"
+      clearTimeout(leaveTimers[slot]);
+      leaveTimers[slot] = setTimeout(() => {
+        if (!conns[slot]) {
+          if (entry.announced) addLog((entry.name || 'Seseorang') + ' keluar', null);
+          dropCall(slot);
+          renderPeople();
+        }
+      }, 1500);
+    };
+    c.on('close', gone);
+    c.on('error', gone);
+  }
+
+  // ---------- Masuk ruangan ----------
+  function claimSlot() {
+    return new Promise((resolve, reject) => {
+      let s = 1;
+      const tryNext = () => {
+        if (s > MAX) { reject(new Error('full')); return; }
+        const p = new Peer(peerId(s), { config: RTC_CONFIG });
+        let opened = false;
+        p.on('open', () => { opened = true; peer = p; mySlot = s; resolve(); });
+        p.on('error', e => {
+          if (!opened && e.type === 'unavailable-id') { p.destroy(); s++; tryNext(); }
+          else if (!opened) { reject(e); }
+          else onPeerError(e);
+        });
+      };
+      tryNext();
+    });
+  }
+
+  function onPeerError(e) {
+    if (e.type === 'peer-unavailable') return; // slot kosong, normal
+    if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) {
+      setStatus('Koneksi ke server perantara bermasalah, mencoba lagi…');
+    } else {
+      setStatus('Masalah koneksi: ' + e.type);
+    }
+  }
+
+  function setupPeer() {
+    peer.on('connection', c => registerData(c, false));
+    peer.on('call', call => {
+      const slot = call.metadata && call.metadata.slot;
+      if (!slot) { call.close(); return; }
+      call.answer(localStream);
+      attachCall(slot, call);
+    });
+    peer.on('disconnected', () => {
+      setStatus('Terputus dari server perantara, menyambung ulang…');
+      setTimeout(() => { try { peer.reconnect(); setStatus(''); } catch (e) {} }, 1500);
+    });
+    for (let s = 1; s <= MAX; s++) {
+      if (s === mySlot) continue;
+      registerData(peer.connect(peerId(s), { metadata: { slot: mySlot }, reliable: true }), true);
+    }
+  }
+
+  async function join() {
+    const nick = $('#nick').value.trim();
+    const code = clean($('#code').value);
+    const err = $('#joinErr');
+    err.textContent = '';
+    if (!nick) { err.textContent = 'Isi namamu dulu.'; return; }
+    if (!code) { err.textContent = 'Isi kode ruangan (huruf/angka).'; return; }
+    if (!window.Peer) { err.textContent = 'Library PeerJS gagal dimuat. Cek koneksi internet.'; return; }
+
+    $('#joinBtn').disabled = true;
+    myName = nick; room = code;
+    try { localStorage.setItem('ngobrol4-nick', nick); } catch (e) {}
+
+    try {
+      localStream = await getMic();
+      await audioCtx.resume();
+      await claimSlot();
+    } catch (e) {
+      $('#joinBtn').disabled = false;
+      err.textContent = e && e.message === 'full'
+        ? 'Ruangan sudah penuh (maks. 4 orang).'
+        : 'Tidak bisa tersambung ke server perantara. Coba lagi sebentar.';
+      return;
+    }
+
+    location.hash = 'room=' + room;
+    $('#join').hidden = true;
+    $('#room').hidden = false;
+    $('#roomName').textContent = '#' + room;
+    if (!micReal) {
+      $('#muteBtn').disabled = true;
+      $('#muteBtn').textContent = '🎤 Mikrofon tidak tersedia';
+      addLog('Mikrofon tidak diizinkan: kamu tetap bisa mendengar dan chat.', null);
+    }
+    addLog('Kamu masuk sebagai ' + myName + '. Menunggu teman lain…', null);
+    watchLevel(localStream, mySlot);
+    setupPeer();
+    renderPeople();
+  }
+
+  // ---------- Event ----------
+  $('#joinBtn').addEventListener('click', join);
+  ['#nick', '#code'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') join(); }));
+
+  $('#chatForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const t = $('#msg').value.trim();
+    if (!t) return;
+    addLog(t, myName, true);
+    broadcast({ t: 'chat', text: t });
+    $('#msg').value = '';
+  });
+
+  $('#muteBtn').addEventListener('click', () => {
+    if (!micReal) return;
+    muted = !muted;
+    localStream.getAudioTracks().forEach(t => { t.enabled = !muted; });
+    $('#muteBtn').textContent = muted ? '🔇 Mikrofon mati' : '🎤 Mikrofon nyala';
+    renderPeople();
+  });
+
+  $('#copyBtn').addEventListener('click', async () => {
+    const link = location.origin + location.pathname + '#room=' + room;
+    try { await navigator.clipboard.writeText(link); setStatus('Link undangan disalin.'); }
+    catch (e) { setStatus(link); }
+    setTimeout(() => setStatus(''), 3000);
+  });
+
+  $('#leaveBtn').addEventListener('click', () => {
+    try { peer && peer.destroy(); } catch (e) {}
+    location.hash = '';
+    location.reload();
+  });
+
+  window.addEventListener('beforeunload', () => { try { peer && peer.destroy(); } catch (e) {} });
+
+  // Isi otomatis dari link undangan dan nama terakhir
+  const m = location.hash.match(/room=([a-z0-9-]+)/i);
+  if (m) $('#code').value = m[1];
+  try { $('#nick').value = localStorage.getItem('ngobrol4-nick') || ''; } catch (e) {}
+})();
+</script>
+</body>
+</html>
